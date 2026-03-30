@@ -1,0 +1,186 @@
+# =============================================================================
+# POLYMARKET ARBITRAGE BOT - GITIGNORE
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# SECURITY - NEVER COMMIT THESE
+# -----------------------------------------------------------------------------
+# Environment files (all variations)
+.env
+.env.*
+.env.local
+.env.*.local
+.env.production
+.env.staging
+.envrc
+*.env
+
+# Private keys and certificates
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.crt
+*.cer
+*.der
+private_key*
+*private*.key
+id_rsa*
+id_ed25519*
+id_ecdsa*
+
+# API keys and secrets
+secret*
+credentials*
+*_secret*
+*_key*
+api_key*
+apikey*
+auth_token*
+access_token*
+*.secret
+.credentials
+.netrc
+
+# Wallet and crypto files
+wallet.json
+wallet*.json
+*.wallet
+keystore/
+.keystore/
+mnemonic*
+seed_phrase*
+*.seed
+recovery_phrase*
+
+# Secrets directories
+.secrets/
+secrets/
+.private/
+
+# -----------------------------------------------------------------------------
+# TRADING DATA - SENSITIVE PATTERNS
+# -----------------------------------------------------------------------------
+# Trade logs with sensitive info
+trades.json
+trade_history*.json
+trade_log*.json
+order_history*.json
+execution_log*.json
+transactions*.json
+
+# Portfolio state files
+portfolio*.json
+positions*.json
+holdings*.json
+balances*.json
+account_state*.json
+
+# Heuristics with trading patterns
+heuristics*.json
+strategies*.json
+signals*.json
+predictions*.json
+models/*.pkl
+models/*.joblib
+*.model
+
+# Audit logs may contain sensitive metadata (tx hashes, addresses)
+logs/audit*.json
+audit*.log
+audit*.json
+transaction_audit*
+
+# -----------------------------------------------------------------------------
+# SESSION & BACKUP FILES
+# -----------------------------------------------------------------------------
+*.session
+.session/
+session_data/
+*.pickle
+*.pkl
+*.bak
+*.backup
+*~backup*
+*.orig
+.cache/
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# -----------------------------------------------------------------------------
+# IDE & Editors
+# -----------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+
+# -----------------------------------------------------------------------------
+# Logs & Data
+# -----------------------------------------------------------------------------
+logs/
+*.log
+*.json.log
+performance.json
+debug_output/
+
+# -----------------------------------------------------------------------------
+# Testing
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# -----------------------------------------------------------------------------
+# OS Files
+# -----------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# -----------------------------------------------------------------------------
+# Local Development
+# -----------------------------------------------------------------------------
+*.local
+*.bak
+tmp/
+temp/
+.tmp/
+scratch/
+local_config*
+dev_*
