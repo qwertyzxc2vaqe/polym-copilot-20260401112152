@@ -136,3 +136,118 @@ class SandboxLatencyTest:
             "avg_latency_ms": sum(latencies) / len(latencies) if latencies else None,
             "endpoints": endpoints_stats
         }
+
+
+def simulate_latency_arbitrage(
+    entry_price: float = 0.98,
+    expiry_price: float = 1.00,
+    network_latency_ms: float = 50.0,
+    n_simulations: int = 1000,
+    market_volatility: float = 0.005,
+) -> dict:
+    """
+    Phase 2 - Task 94: Mathematically model the Gabagool $0.98 -> $1.00
+    expiry arbitrage with assumed network latency.
+    
+    Simulates the probability of successful arbitrage execution given
+    network latency and market volatility.
+    
+    Args:
+        entry_price: Entry price for the arbitrage (e.g., 0.98)
+        expiry_price: Expected expiry price (e.g., 1.00)
+        network_latency_ms: Network round-trip latency in milliseconds
+        n_simulations: Number of Monte Carlo simulations
+        market_volatility: Per-second price volatility
+    
+    Returns:
+        Dictionary with success rate, expected PnL, and statistics
+    """
+    import random
+    import math
+    
+    results = {
+        'successful_trades': 0,
+        'failed_trades': 0,
+        'pnl_values': [],
+        'slippage_values': [],
+        'execution_times': [],
+    }
+    
+    # Convert latency to seconds
+    latency_s = network_latency_ms / 1000.0
+    
+    # Simulate arbitrage attempts
+    for _ in range(n_simulations):
+        # Simulate price movement during latency window
+        # Price can move due to volatility during order execution
+        price_drift = random.gauss(0, market_volatility * math.sqrt(latency_s))
+        
+        # Effective execution price
+        execution_price = entry_price * (1 + price_drift)
+        
+        # Add random execution time jitter (±20% of latency)
+        actual_latency = latency_s * (1 + random.uniform(-0.2, 0.2))
+        results['execution_times'].append(actual_latency * 1000)
+        
+        # Determine if trade was successful
+        # Trade fails if:
+        # 1. Price moved too much (slippage > 1%)
+        # 2. Order arrived too late (simulated with probability)
+        
+        slippage = abs(execution_price - entry_price) / entry_price
+        results['slippage_values'].append(slippage * 10000)  # In bps
+        
+        # Success probability decreases with latency
+        # Assuming 1-second window for arbitrage
+        time_success_prob = max(0, 1 - (actual_latency / 1.0))
+        
+        # Price success: slippage under 1%
+        price_success = slippage < 0.01
+        
+        # Combined success
+        is_successful = price_success and random.random() < time_success_prob
+        
+        if is_successful:
+            results['successful_trades'] += 1
+            # PnL = (expiry_price - execution_price) * shares
+            pnl = (expiry_price - execution_price)
+            results['pnl_values'].append(pnl)
+        else:
+            results['failed_trades'] += 1
+            # Failed trade: lose the spread or position goes against us
+            pnl = -abs(entry_price - execution_price)
+            results['pnl_values'].append(pnl)
+    
+    # Calculate statistics
+    success_rate = results['successful_trades'] / n_simulations
+    
+    pnl_values = results['pnl_values']
+    avg_pnl = sum(pnl_values) / len(pnl_values)
+    
+    # Sort for percentiles
+    sorted_pnl = sorted(pnl_values)
+    p5_pnl = sorted_pnl[int(n_simulations * 0.05)]
+    p95_pnl = sorted_pnl[int(n_simulations * 0.95)]
+    
+    slippage_values = results['slippage_values']
+    avg_slippage = sum(slippage_values) / len(slippage_values)
+    
+    exec_times = results['execution_times']
+    avg_exec_time = sum(exec_times) / len(exec_times)
+    
+    return {
+        'entry_price': entry_price,
+        'expiry_price': expiry_price,
+        'network_latency_ms': network_latency_ms,
+        'n_simulations': n_simulations,
+        'success_rate': success_rate * 100,  # Percentage
+        'expected_pnl_per_trade': avg_pnl,
+        'expected_pnl_per_100_trades': avg_pnl * 100,
+        'pnl_5th_percentile': p5_pnl,
+        'pnl_95th_percentile': p95_pnl,
+        'avg_slippage_bps': avg_slippage,
+        'avg_execution_time_ms': avg_exec_time,
+        'max_execution_time_ms': max(exec_times),
+        'profitable_threshold_latency_ms': 100,  # Estimated
+        'recommendation': 'VIABLE' if success_rate > 0.8 and avg_pnl > 0 else 'RISKY',
+    }

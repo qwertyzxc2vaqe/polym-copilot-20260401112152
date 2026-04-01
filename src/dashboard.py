@@ -3,12 +3,15 @@ Rich TUI Dashboard for Polymarket Arbitrage Bot.
 
 Live monitoring dashboard displaying 5-minute BTC/ETH markets,
 oracle prices, rate limiting status, and bot state.
+
+Phase 2 - Tasks 76-77: Added equity curve sparkline and ML confidence gauge.
 """
 
 import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
+from collections import deque
 
 from rich.console import Console
 from rich.layout import Layout
@@ -87,6 +90,14 @@ class Dashboard:
         self._merged_shares: int = 0
         self._paper_usdc: float = 100.0
         self._session_start_time = datetime.now(timezone.utc)
+        
+        # Phase 2 - Task 76: Equity curve history for sparkline
+        self._equity_history: deque = deque(maxlen=50)
+        self._equity_history.append(100.0)  # Initial equity
+        
+        # Phase 2 - Task 77: ML confidence tracking
+        self._ml_confidence: float = 0.5  # 0.0 to 1.0
+        self._ml_direction: str = "neutral"  # "up", "down", "neutral"
     
     def get_bot_mode(self) -> str:
         """Get the current bot mode as a display string."""
@@ -521,6 +532,127 @@ class Dashboard:
             border_style="green",
             padding=(1, 2),
         )
+    
+    def get_equity_sparkline(self) -> Panel:
+        """
+        Phase 2 - Task 76: Sparkline chart for equity curve using rich.
+        
+        Uses Unicode block characters to create a simple sparkline.
+        """
+        if len(self._equity_history) < 2:
+            return Panel(
+                Text("Collecting data...", style="dim italic"),
+                title="[bold yellow]EQUITY CURVE[/bold yellow]",
+                border_style="yellow",
+                padding=(1, 2),
+            )
+        
+        # Sparkline characters (from lowest to highest)
+        spark_chars = " ▁▂▃▄▅▆▇█"
+        
+        values = list(self._equity_history)
+        min_val = min(values)
+        max_val = max(values)
+        val_range = max_val - min_val if max_val != min_val else 1
+        
+        # Build sparkline
+        sparkline = ""
+        for val in values:
+            normalized = (val - min_val) / val_range
+            idx = int(normalized * (len(spark_chars) - 1))
+            sparkline += spark_chars[idx]
+        
+        # Color based on trend
+        current = values[-1]
+        previous = values[0]
+        if current > previous:
+            trend_style = "green bold"
+            trend_text = "UP"
+        elif current < previous:
+            trend_style = "red bold"
+            trend_text = "DOWN"
+        else:
+            trend_style = "yellow"
+            trend_text = "FLAT"
+        
+        content = Text()
+        content.append(sparkline + "\n", style=trend_style)
+        content.append(f"\nEquity: ${current:.2f}  ", style="bold")
+        content.append(f"({trend_text})", style=trend_style)
+        content.append(f"\nRange: ${min_val:.2f} - ${max_val:.2f}", style="dim")
+        
+        return Panel(
+            content,
+            title="[bold yellow]EQUITY CURVE[/bold yellow]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    
+    def get_ml_confidence_panel(self) -> Panel:
+        """
+        Phase 2 - Task 77: ML Confidence gauge showing model's prediction.
+        
+        Displays the PyTorch model's confidence for next tick direction.
+        """
+        confidence_pct = self._ml_confidence * 100
+        
+        # Build progress bar
+        bar_width = 20
+        filled = int(confidence_pct / 100 * bar_width)
+        empty = bar_width - filled
+        
+        # Color based on confidence level
+        if confidence_pct >= 70:
+            bar_style = "green bold"
+            conf_text = "HIGH"
+        elif confidence_pct >= 50:
+            bar_style = "yellow"
+            conf_text = "MEDIUM"
+        else:
+            bar_style = "red"
+            conf_text = "LOW"
+        
+        # Direction indicator
+        dir_indicators = {
+            "up": ("UP", "green bold"),
+            "down": ("DOWN", "red bold"),
+            "neutral": ("NEUTRAL", "yellow"),
+        }
+        dir_text, dir_style = dir_indicators.get(self._ml_direction, ("NEUTRAL", "yellow"))
+        
+        content = Text()
+        content.append("Model Confidence\n\n", style="bold dim")
+        
+        # Progress bar
+        content.append("[", style="dim")
+        content.append("=" * filled, style=bar_style)
+        content.append("-" * empty, style="dim")
+        content.append("]", style="dim")
+        content.append(f" {confidence_pct:.0f}%\n\n", style=bar_style)
+        
+        # Direction prediction
+        content.append("Prediction: ", style="bold")
+        content.append(f"{dir_text}\n", style=dir_style)
+        
+        # Confidence level
+        content.append("Confidence: ", style="bold")
+        content.append(f"{conf_text}", style=bar_style)
+        
+        return Panel(
+            content,
+            title="[bold magenta]ML PREDICTION[/bold magenta]",
+            border_style="magenta",
+            padding=(1, 2),
+        )
+    
+    def update_ml_confidence(self, confidence: float, direction: str) -> None:
+        """Update ML model confidence and direction."""
+        self._ml_confidence = max(0.0, min(1.0, confidence))
+        self._ml_direction = direction
+    
+    def update_equity(self, equity: float) -> None:
+        """Add new equity value to history."""
+        self._equity_history.append(equity)
     
     def get_header(self) -> Panel:
         """Build the header panel."""

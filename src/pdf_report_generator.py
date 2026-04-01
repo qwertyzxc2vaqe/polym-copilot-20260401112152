@@ -30,6 +30,9 @@ try:
     REPORTLAB_AVAILABLE = True
 except ImportError:
     REPORTLAB_AVAILABLE = False
+    # Define stub types to avoid NameError on class definition
+    Table = None
+    Drawing = None
     logger.warning("reportlab not available, PDF generation disabled")
 
 
