@@ -1,0 +1,34 @@
+# Prometheus Configuration for Polym Educational Sandbox
+# Scrapes metrics from the Python simulation engine
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'polym-sandbox'
+
+rule_files:
+  # - "alerts.yml"
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Polym simulation engine metrics
+  - job_name: 'polym_engine'
+    static_configs:
+      - targets: ['host.docker.internal:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 5s
+
+  # Redis metrics (if redis_exporter is used)
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis:9121']
+
+  # PostgreSQL metrics (if postgres_exporter is used)
+  # - job_name: 'postgres'
+  #   static_configs:
+  #     - targets: ['postgres:9187']

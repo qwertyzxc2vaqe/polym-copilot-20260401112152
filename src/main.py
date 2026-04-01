@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Polymarket Arbitrage Bot - Main Orchestrator
+Main Orchestrator for Polymarket Educational Sandbox.
+
+Implements asyncio.gather for concurrent BTC/ETH simulation.
 High-Frequency 5-Minute Portfolio Compounding System
 
 Phase 2D: Multi-Currency Async Orchestration
 - Independent per-asset trading loops (BTC/ETH run concurrently)
 - Fault isolation: one asset crash doesn't affect others
 - Per-asset pause/resume functionality
+- Dashboard and terminal velocity integration
 """
 
 import asyncio
@@ -16,7 +19,7 @@ import sys
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Callable
 from enum import Enum
 
 # Import all modules
@@ -29,9 +32,20 @@ from executor import ZeroFeeExecutor
 from ta_fallback import TechnicalAnalyzer
 from security import SecurityContext
 from terminal_velocity import TerminalVelocityController, TerminalPhase
+from dashboard import Dashboard
+
+try:
+    from ofi_engine import OFIEngine, create_ofi_engine, OFISignal
+    HAS_OFI_ENGINE = True
+except ImportError:
+    HAS_OFI_ENGINE = False
 
 logger = logging.getLogger(__name__)
 
+
+# ============================================================================
+# ENUMS AND DATA CLASSES
+# ============================================================================
 
 class ScanningPhase(Enum):
     """Current phase of the scanning loop for an asset."""
@@ -62,14 +76,420 @@ class AssetState:
     consecutive_errors: int = 0
 
 
+# ============================================================================
+# ASYNC ORCHESTRATION SERVICES (for asyncio.gather)
+# ============================================================================
+
+async def run_oracle_service(oracle: BinanceOracle) -> None:
+    """Run Binance oracle WebSocket connection continuously.
+    
+    Args:
+        oracle: BinanceOracle instance to run
+    """
+    try:
+        logger.info("[ORACLE] Starting Binance price stream...")
+        await oracle.connect()
+    except asyncio.CancelledError:
+        logger.info("[ORACLE] Cancelled")
+        await oracle.close()
+        raise
+    except Exception as e:
+        logger.error(f"[ORACLE] Fatal error: {e}")
+        raise
+
+
+async def run_sniper_service(sniper: PolymarketSniper) -> None:
+    """Run Polymarket sniper WebSocket connection continuously.
+    
+    Args:
+        sniper: PolymarketSniper instance to run
+    """
+    try:
+        logger.info("[SNIPER] Starting Polymarket order book streaming...")
+        await sniper.run()
+    except asyncio.CancelledError:
+        logger.info("[SNIPER] Cancelled")
+        await sniper.close()
+        raise
+    except Exception as e:
+        logger.error(f"[SNIPER] Fatal error: {e}")
+        raise
+
+
+async def run_ta_service(ta: TechnicalAnalyzer, on_signal: Callable) -> None:
+    """Run technical analysis background service.
+    
+    Args:
+        ta: TechnicalAnalyzer instance
+        on_signal: Callback function when TA signal occurs
+    """
+    try:
+        logger.info("[TA] Starting technical analysis background service...")
+        await ta.run_background_analysis(on_signal)
+    except asyncio.CancelledError:
+        logger.info("[TA] Cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"[TA] Fatal error: {e}")
+        raise
+
+
+async def run_dashboard_service(dashboard: Dashboard) -> None:
+    """Run the TUI dashboard.
+    
+    Args:
+        dashboard: Dashboard instance to run
+    """
+    try:
+        logger.info("[DASHBOARD] Starting live dashboard...")
+        await dashboard.run()
+    except asyncio.CancelledError:
+        logger.info("[DASHBOARD] Cancelled")
+        try:
+            await dashboard.stop()
+        except:
+            pass
+        raise
+    except Exception as e:
+        logger.error(f"[DASHBOARD] Fatal error: {e}")
+        raise
+
+
+async def run_terminal_velocity_service(terminal_velocity: TerminalVelocityController) -> None:
+    """Run the Terminal Velocity controller for T-60 WebSocket ignition.
+    
+    Args:
+        terminal_velocity: TerminalVelocityController instance
+    """
+    try:
+        logger.info("[BOLT] Starting Terminal Velocity controller...")
+        # Controller runs in the background handling market transitions
+        while True:
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        logger.info("[BOLT] Cancelled")
+        try:
+            await terminal_velocity.stop()
+        except:
+            pass
+        raise
+    except Exception as e:
+        logger.error(f"[BOLT] Fatal error: {e}")
+        raise
+
+
+async def run_ofi_engine_service(assets: List[str]) -> None:
+    """Run the OFI (Order Flow Imbalance) Engine if available.
+    
+    Args:
+        assets: List of assets to monitor (e.g., ["btcusdt", "ethusdt"])
+    """
+    if not HAS_OFI_ENGINE:
+        logger.info("[OFI] OFI Engine not available, skipping")
+        await asyncio.sleep(999999)  # Run indefinitely but don't crash
+        return
+    
+    try:
+        logger.info("[OFI] Starting Order Flow Imbalance engine...")
+        ofi_engine = await create_ofi_engine(assets)
+        await ofi_engine.run()
+    except asyncio.CancelledError:
+        logger.info("[OFI] Cancelled")
+        raise
+    except Exception as e:
+        logger.error(f"[OFI] Fatal error: {e}")
+        raise
+
+
+async def run_stats_reporter(orchestrator: 'Orchestrator') -> None:
+    """Report trading statistics every minute.
+    
+    Args:
+        orchestrator: Parent orchestrator instance
+    """
+    CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
+    
+    while orchestrator._running:
+        try:
+            await asyncio.sleep(60)
+            
+            print("\n" + "-" * 40)
+            print(f"  [STATS] @ {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
+            print("-" * 40)
+            
+            for symbol in CRYPTO_SYMBOLS:
+                price_data = orchestrator._oracle.get_price(symbol)
+                if price_data:
+                    print(f"  {symbol}: ${price_data.price:,.2f}")
+                else:
+                    print(f"  {symbol}: N/A")
+            
+            print(f"  Trades: {orchestrator._total_trades}")
+            print(f"  Profit: ${orchestrator._total_profit:.2f}")
+            print("-" * 40 + "\n")
+            
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"Stats reporter error: {e}")
+
+
+async def run_btc_simulation(
+    orchestrator: 'Orchestrator',
+    scanner: MarketScanner,
+    arbitrage: ArbitrageEngine,
+    executor: ZeroFeeExecutor,
+) -> None:
+    """
+    BTC market simulation loop.
+    
+    Independent trading loop for BTC markets that:
+    - Scans for BTC 5-minute markets every 30 seconds
+    - Analyzes for arbitrage opportunities
+    - Executes profitable trades
+    - Handles T-60 terminal velocity transitions
+    - Supports dynamic pause/resume
+    
+    Args:
+        orchestrator: Parent orchestrator for state management
+        scanner: Market scanner instance
+        arbitrage: Arbitrage analysis engine
+        executor: Trade executor
+    """
+    asset = "BTC"
+    state = orchestrator._asset_states[asset]
+    base_interval = orchestrator.ASSET_SCAN_INTERVALS.get(asset, 30.0)
+    
+    logger.info(f"[{asset}] Starting independent trading loop (interval: {base_interval}s)")
+    
+    while orchestrator._running:
+        try:
+            # Check if paused
+            if state.is_paused:
+                state.phase = ScanningPhase.PAUSED
+                if state.pause_until and datetime.now(timezone.utc) >= state.pause_until:
+                    logger.info(f"[{asset}] Pause expired, resuming")
+                    state.is_paused = False
+                    state.pause_until = None
+                else:
+                    await asyncio.sleep(1.0)
+                    continue
+            
+            # Scan phase
+            state.phase = ScanningPhase.SCANNING
+            state.last_scan = datetime.now(timezone.utc)
+            state.total_scans += 1
+            
+            markets = await orchestrator._scan_markets_for_asset(asset)
+            
+            if markets:
+                logger.debug(f"[{asset}] Found {len(markets)} markets")
+                state.active_market = markets[0] if markets else None
+                
+                # Check for market expiry (T=0)
+                if state.active_market and state.active_market.seconds_to_expiry <= 0:
+                    logger.warning(f"[{asset}] Market expired (T=0), initiating post-sale cooldown")
+                    expired_token_ids = [state.active_market.yes_token_id, state.active_market.no_token_id]
+                    await orchestrator._sniper.unsubscribe(expired_token_ids)
+                    orchestrator.pause_asset(asset, duration_seconds=10.0, reason="post-sale-cooldown")
+                    await asyncio.sleep(1.0)
+                    continue
+                
+                # Terminal velocity check (T-60)
+                terminal_markets = []
+                rest_markets = []
+                for market in markets:
+                    is_terminal = await orchestrator._terminal_velocity.check_market_for_terminal(market)
+                    if is_terminal:
+                        terminal_markets.append(market)
+                    else:
+                        rest_markets.append(market)
+                
+                if terminal_markets:
+                    logger.info(f"[{asset}] [BOLT] {len(terminal_markets)} market(s) in terminal mode")
+                
+                # Analysis phase
+                state.phase = ScanningPhase.ANALYZING
+                if rest_markets:
+                    token_ids = []
+                    for m in rest_markets:
+                        token_ids.extend([m.yes_token_id, m.no_token_id])
+                    await orchestrator._sniper.subscribe(token_ids)
+                
+                opportunities: List[ArbitrageOpportunity] = []
+                for market in rest_markets:
+                    opp = await arbitrage.analyze_market(market)
+                    if opp and opp.profit_margin > 0:
+                        opportunities.append(opp)
+                
+                if opportunities:
+                    logger.info(f"[{asset}] Found {len(opportunities)} profitable opportunities")
+                    state.phase = ScanningPhase.EXECUTING
+                    best = max(opportunities, key=lambda x: x.profit_margin)
+                    await orchestrator._execute_opportunity(best, asset)
+            else:
+                state.active_market = None
+            
+            state.consecutive_errors = 0
+            
+            # Wait phase
+            state.phase = ScanningPhase.WAITING
+            scan_interval = orchestrator._get_dynamic_scan_interval(markets) if markets else base_interval
+            await asyncio.sleep(scan_interval)
+            
+        except asyncio.CancelledError:
+            logger.info(f"[{asset}] Trading loop cancelled")
+            state.phase = ScanningPhase.IDLE
+            raise
+        except Exception as e:
+            state.phase = ScanningPhase.ERROR
+            state.last_error = str(e)
+            state.error_count += 1
+            state.consecutive_errors += 1
+            logger.error(f"[{asset}] Trading loop error: {e}")
+            backoff = min(60, 2 ** min(state.consecutive_errors, 6))
+            logger.info(f"[{asset}] Backing off {backoff}s")
+            await asyncio.sleep(backoff)
+    
+    state.phase = ScanningPhase.IDLE
+    logger.info(f"[{asset}] Trading loop stopped")
+
+
+async def run_eth_simulation(
+    orchestrator: 'Orchestrator',
+    scanner: MarketScanner,
+    arbitrage: ArbitrageEngine,
+    executor: ZeroFeeExecutor,
+) -> None:
+    """
+    ETH market simulation loop.
+    
+    Independent trading loop for ETH markets that:
+    - Scans for ETH 5-minute markets every 30 seconds
+    - Analyzes for arbitrage opportunities
+    - Executes profitable trades
+    - Handles T-60 terminal velocity transitions
+    - Supports dynamic pause/resume
+    
+    Args:
+        orchestrator: Parent orchestrator for state management
+        scanner: Market scanner instance
+        arbitrage: Arbitrage analysis engine
+        executor: Trade executor
+    """
+    asset = "ETH"
+    state = orchestrator._asset_states[asset]
+    base_interval = orchestrator.ASSET_SCAN_INTERVALS.get(asset, 30.0)
+    
+    logger.info(f"[{asset}] Starting independent trading loop (interval: {base_interval}s)")
+    
+    while orchestrator._running:
+        try:
+            # Check if paused
+            if state.is_paused:
+                state.phase = ScanningPhase.PAUSED
+                if state.pause_until and datetime.now(timezone.utc) >= state.pause_until:
+                    logger.info(f"[{asset}] Pause expired, resuming")
+                    state.is_paused = False
+                    state.pause_until = None
+                else:
+                    await asyncio.sleep(1.0)
+                    continue
+            
+            # Scan phase
+            state.phase = ScanningPhase.SCANNING
+            state.last_scan = datetime.now(timezone.utc)
+            state.total_scans += 1
+            
+            markets = await orchestrator._scan_markets_for_asset(asset)
+            
+            if markets:
+                logger.debug(f"[{asset}] Found {len(markets)} markets")
+                state.active_market = markets[0] if markets else None
+                
+                # Check for market expiry (T=0)
+                if state.active_market and state.active_market.seconds_to_expiry <= 0:
+                    logger.warning(f"[{asset}] Market expired (T=0), initiating post-sale cooldown")
+                    expired_token_ids = [state.active_market.yes_token_id, state.active_market.no_token_id]
+                    await orchestrator._sniper.unsubscribe(expired_token_ids)
+                    orchestrator.pause_asset(asset, duration_seconds=10.0, reason="post-sale-cooldown")
+                    await asyncio.sleep(1.0)
+                    continue
+                
+                # Terminal velocity check (T-60)
+                terminal_markets = []
+                rest_markets = []
+                for market in markets:
+                    is_terminal = await orchestrator._terminal_velocity.check_market_for_terminal(market)
+                    if is_terminal:
+                        terminal_markets.append(market)
+                    else:
+                        rest_markets.append(market)
+                
+                if terminal_markets:
+                    logger.info(f"[{asset}] [BOLT] {len(terminal_markets)} market(s) in terminal mode")
+                
+                # Analysis phase
+                state.phase = ScanningPhase.ANALYZING
+                if rest_markets:
+                    token_ids = []
+                    for m in rest_markets:
+                        token_ids.extend([m.yes_token_id, m.no_token_id])
+                    await orchestrator._sniper.subscribe(token_ids)
+                
+                opportunities: List[ArbitrageOpportunity] = []
+                for market in rest_markets:
+                    opp = await arbitrage.analyze_market(market)
+                    if opp and opp.profit_margin > 0:
+                        opportunities.append(opp)
+                
+                if opportunities:
+                    logger.info(f"[{asset}] Found {len(opportunities)} profitable opportunities")
+                    state.phase = ScanningPhase.EXECUTING
+                    best = max(opportunities, key=lambda x: x.profit_margin)
+                    await orchestrator._execute_opportunity(best, asset)
+            else:
+                state.active_market = None
+            
+            state.consecutive_errors = 0
+            
+            # Wait phase
+            state.phase = ScanningPhase.WAITING
+            scan_interval = orchestrator._get_dynamic_scan_interval(markets) if markets else base_interval
+            await asyncio.sleep(scan_interval)
+            
+        except asyncio.CancelledError:
+            logger.info(f"[{asset}] Trading loop cancelled")
+            state.phase = ScanningPhase.IDLE
+            raise
+        except Exception as e:
+            state.phase = ScanningPhase.ERROR
+            state.last_error = str(e)
+            state.error_count += 1
+            state.consecutive_errors += 1
+            logger.error(f"[{asset}] Trading loop error: {e}")
+            backoff = min(60, 2 ** min(state.consecutive_errors, 6))
+            logger.info(f"[{asset}] Backing off {backoff}s")
+            await asyncio.sleep(backoff)
+    
+    state.phase = ScanningPhase.IDLE
+    logger.info(f"[{asset}] Trading loop stopped")
+
+
+# ============================================================================
+# ORCHESTRATOR CLASS (manages component lifecycle)
+# ============================================================================
+
 class Orchestrator:
     """
     Main orchestrator coordinating all bot components in a unified async event loop.
     
-    Phase 2D: Multi-Currency Async Orchestration
+    Phase 2D: Multi-Currency Async Orchestration with asyncio.gather
     - Independent per-asset trading loops (BTC/ETH run concurrently but independently)
     - Fault isolation: one asset loop crash doesn't affect others
     - Per-asset pause/resume functionality
+    - Dashboard and terminal velocity integration
+    - OFI Engine for order flow analysis
     
     Components:
     - MarketScanner: Continuously find 5-minute markets
@@ -78,6 +498,9 @@ class Orchestrator:
     - ArbitrageEngine: Analyze opportunities
     - ZeroFeeExecutor: Execute trades
     - TechnicalAnalyzer: Fallback signals
+    - Dashboard: TUI monitoring
+    - TerminalVelocityController: T-60 WebSocket ignition
+    - OFIEngine: Order flow imbalance analysis
     """
     
     # Supported assets for independent trading loops
@@ -103,15 +526,13 @@ class Orchestrator:
         self._ta: Optional[TechnicalAnalyzer] = None
         self._security: Optional[SecurityContext] = None
         self._terminal_velocity: Optional[TerminalVelocityController] = None
+        self._dashboard: Optional[Dashboard] = None
         
         # Per-asset state tracking (Phase 2D)
         self._asset_states: Dict[str, AssetState] = {
             asset: AssetState(asset=asset)
             for asset in self.SUPPORTED_ASSETS
         }
-        
-        # Per-asset task handles for management
-        self._asset_tasks: Dict[str, asyncio.Task] = {}
         
         # Trading state (aggregate)
         self._active_positions: List = []
@@ -123,7 +544,7 @@ class Orchestrator:
         self._scan_cache_time: Optional[datetime] = None
         self._scan_cache_lock = asyncio.Lock()
         self._scan_cache_ttl = 1.0  # Cache valid for 1 second
-        
+    
     async def initialize(self):
         """Initialize all components."""
         logger.info("Initializing Polymarket Arbitrage Bot...")
@@ -160,7 +581,11 @@ class Orchestrator:
         self._ta = TechnicalAnalyzer(oracle=self._oracle)
         logger.info("[OK] Technical analyzer initialized")
         
-        # Initialize Terminal Velocity Controller (Phase 2: T-60 WebSocket ignition)
+        # Initialize Dashboard
+        self._dashboard = Dashboard(self._oracle, self._scanner, self._config)
+        logger.info("[OK] Dashboard initialized")
+        
+        # Initialize Terminal Velocity Controller
         self._terminal_velocity = TerminalVelocityController(
             sniper=self._sniper,
             on_stop_rest_polling=self._on_terminal_stop_rest,
@@ -186,54 +611,69 @@ class Orchestrator:
         print("-" * 60 + "\n")
     
     async def run(self):
-        """Main event loop with independent per-asset trading loops."""
+        """
+        Main event loop using asyncio.gather for concurrent execution.
+        
+        Runs all components concurrently:
+        - Oracle (Binance price streaming)
+        - Sniper (Polymarket order book streaming)
+        - Technical Analysis background service
+        - BTC simulation loop
+        - ETH simulation loop
+        - Dashboard
+        - Terminal Velocity controller
+        - OFI Engine (if available)
+        - Stats reporter
+        """
         self._running = True
         
-        # Start shared background tasks
-        shared_tasks = [
-            asyncio.create_task(self._oracle_task(), name="oracle"),
-            asyncio.create_task(self._sniper_task(), name="sniper"),
-            asyncio.create_task(self._ta_task(), name="ta"),
-            asyncio.create_task(self._stats_reporter(), name="stats"),
-        ]
-        
-        # Start independent per-asset trading loops (Phase 2D)
-        for asset in self.SUPPORTED_ASSETS:
-            task = asyncio.create_task(
-                self._asset_trading_loop(asset),
-                name=f"trading-{asset}"
-            )
-            self._asset_tasks[asset] = task
-        
-        all_tasks = shared_tasks + list(self._asset_tasks.values())
-        
-        # Handle shutdown signals
+        # Setup signal handlers for graceful shutdown
         self._setup_signal_handlers()
         
         logger.info("Bot started - press Ctrl+C to stop")
-        logger.info(f"Running independent loops for: {', '.join(self.SUPPORTED_ASSETS)}")
+        logger.info("Running asyncio.gather orchestration with concurrent BTC/ETH simulations")
         print("\n>> Bot is running...\n")
         
-        # Wait for shutdown or error
         try:
-            await self._shutdown_event.wait()
+            # Run all services concurrently using asyncio.gather
+            await asyncio.gather(
+                # Core data services
+                run_oracle_service(self._oracle),
+                run_sniper_service(self._sniper),
+                run_ta_service(self._ta, self._on_ta_signal),
+                
+                # Simulation loops (BTC and ETH run completely asynchronously)
+                run_btc_simulation(self, self._scanner, self._arbitrage, self._executor),
+                run_eth_simulation(self, self._scanner, self._arbitrage, self._executor),
+                
+                # UI and monitoring
+                run_dashboard_service(self._dashboard),
+                run_terminal_velocity_service(self._terminal_velocity),
+                run_ofi_engine_service(["btcusdt", "ethusdt"]),
+                
+                # Stats reporting
+                run_stats_reporter(self),
+                
+                # Wait for shutdown signal
+                self._wait_for_shutdown(),
+            )
+        except asyncio.CancelledError:
+            logger.info("Orchestration cancelled")
+        except Exception as e:
+            logger.error(f"Orchestration error: {e}")
+            raise
         finally:
             self._running = False
             logger.info("Shutting down...")
-            
-            # Cancel all tasks
-            for task in all_tasks:
-                task.cancel()
-            
-            # Wait for tasks to complete
-            results = await asyncio.gather(*all_tasks, return_exceptions=True)
-            for task, result in zip(all_tasks, results):
-                if isinstance(result, Exception) and not isinstance(result, asyncio.CancelledError):
-                    logger.error(f"Task {task.get_name()} failed: {result}")
-            
-            # Cleanup
             await self._cleanup()
             logger.info("Bot shutdown complete")
+    
+    async def _wait_for_shutdown(self) -> None:
+        """Wait for shutdown signal."""
+        try:
+            await self._shutdown_event.wait()
+        except asyncio.CancelledError:
+            raise
     
     def _setup_signal_handlers(self):
         """Setup graceful shutdown signal handlers."""
@@ -248,185 +688,6 @@ class Orchestrator:
             except NotImplementedError:
                 # Windows doesn't support add_signal_handler
                 pass
-    
-    async def _oracle_task(self):
-        """Run Binance oracle connection."""
-        try:
-            await self._oracle.connect()
-        except asyncio.CancelledError:
-            await self._oracle.close()
-            raise
-        except Exception as e:
-            logger.error(f"Oracle error: {e}")
-            raise
-    
-    async def _sniper_task(self):
-        """Run Polymarket sniper."""
-        try:
-            await self._sniper.run()
-        except asyncio.CancelledError:
-            await self._sniper.close()
-            raise
-        except Exception as e:
-            logger.error(f"Sniper error: {e}")
-            raise
-    
-    async def _ta_task(self):
-        """Run technical analysis background task."""
-        try:
-            await self._ta.run_background_analysis(self._on_ta_signal)
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            logger.error(f"TA error: {e}")
-            raise
-    
-    async def _asset_trading_loop(self, asset: str):
-        """
-        Independent trading loop for a specific asset (Phase 2D).
-        
-        Each asset runs its own loop with:
-        - Independent scan timing (BTC doesn't block ETH and vice versa)
-        - Isolated error handling (one crash doesn't affect the other)
-        - Per-asset pause/resume capability
-        - Dynamic scan interval: 30s normally, 100ms in final minute before market close
-        
-        Args:
-            asset: The asset to trade (e.g., "BTC", "ETH")
-        """
-        state = self._asset_states[asset]
-        base_interval = self.ASSET_SCAN_INTERVALS.get(asset, 30.0)
-        
-        logger.info(f"[{asset}] Starting independent trading loop (base interval: {base_interval}s, dynamic near expiry)")
-        
-        while self._running:
-            try:
-                # Check if paused
-                if state.is_paused:
-                    state.phase = ScanningPhase.PAUSED
-                    
-                    # Check if pause has expired
-                    if state.pause_until and datetime.now(timezone.utc) >= state.pause_until:
-                        logger.info(f"[{asset}] Pause expired, resuming")
-                        state.is_paused = False
-                        state.pause_until = None
-                    else:
-                        await asyncio.sleep(1.0)
-                        continue
-                
-                # Scan phase
-                state.phase = ScanningPhase.SCANNING
-                state.last_scan = datetime.now(timezone.utc)
-                state.total_scans += 1
-                
-                # Get markets for this specific asset
-                markets = await self._scan_markets_for_asset(asset)
-                
-                if markets:
-                    logger.debug(f"[{asset}] Found {len(markets)} markets to analyze")
-                    state.active_market = markets[0] if markets else None
-                    
-                    # CHECK FOR MARKET EXPIRY (T=0) - POST-SALE COOLDOWN PROTOCOL
-                    active_market = state.active_market
-                    if active_market and active_market.seconds_to_expiry <= 0:
-                        logger.warning(
-                            f"[{asset}] POST-SALE COOLDOWN: Market T=0 detected! "
-                            f"Market: {active_market.condition_id} has expired."
-                        )
-                        
-                        # STEP 1: Unsubscribe from expired market's tokens
-                        expired_token_ids = [active_market.yes_token_id, active_market.no_token_id]
-                        logger.info(
-                            f"[{asset}] COOLDOWN STEP 1: Closing WebSocket connections for tokens "
-                            f"{expired_token_ids} to free RAM and network bandwidth"
-                        )
-                        await self._sniper.unsubscribe(expired_token_ids)
-                        
-                        # STEP 2: Initiate 10-second cooldown while Polymarket resolves contract
-                        logger.info(f"[{asset}] COOLDOWN STEP 2: Pausing {asset} for 10 seconds while market resolves")
-                        self.pause_asset(asset, duration_seconds=10.0, reason="post-sale-cooldown")
-                        
-                        # Skip the rest of this iteration - resume will happen automatically
-                        await asyncio.sleep(1.0)
-                        continue
-                    
-                    # [BOLT] TERMINAL VELOCITY CHECK (T-60 seconds)
-                    # Check each market for terminal phase transition
-                    terminal_markets = []
-                    rest_markets = []  # Markets still using REST polling
-                    
-                    for market in markets:
-                        # Check if market should ignite terminal velocity
-                        is_terminal = await self._terminal_velocity.check_market_for_terminal(market)
-                        if is_terminal:
-                            terminal_markets.append(market)
-                        else:
-                            rest_markets.append(market)
-                    
-                    if terminal_markets:
-                        logger.info(
-                            f"[{asset}] [BOLT] {len(terminal_markets)} market(s) in TERMINAL VELOCITY mode "
-                            f"(WebSocket streaming active)"
-                        )
-                    
-                    # Analysis phase - only for REST markets (terminal markets are handled by WebSocket)
-                    state.phase = ScanningPhase.ANALYZING
-                    
-                    # Subscribe to order books only for non-terminal markets
-                    # Terminal markets are subscribed by TerminalVelocityController
-                    if rest_markets:
-                        token_ids = []
-                        for m in rest_markets:
-                            token_ids.extend([m.yes_token_id, m.no_token_id])
-                        await self._sniper.subscribe(token_ids)
-                    
-                    # Analyze each market for arbitrage opportunities
-                    # For terminal markets, the TerminalVelocityController will trigger
-                    # _on_terminal_strike callback when opportunities arise
-                    opportunities: List[ArbitrageOpportunity] = []
-                    for market in rest_markets:
-                        opp = await self._arbitrage.analyze_market(market)
-                        if opp and opp.profit_margin > 0:
-                            opportunities.append(opp)
-                    
-                    if opportunities:
-                        logger.info(f"[{asset}] Found {len(opportunities)} profitable opportunities")
-                        
-                        # Execute best opportunity
-                        state.phase = ScanningPhase.EXECUTING
-                        best = max(opportunities, key=lambda x: x.profit_margin)
-                        await self._execute_opportunity(best, asset)
-                else:
-                    state.active_market = None
-                
-                # Reset consecutive errors on successful iteration
-                state.consecutive_errors = 0
-                
-                # Wait phase - use dynamic interval based on time to market close
-                state.phase = ScanningPhase.WAITING
-                scan_interval = self._get_dynamic_scan_interval(markets) if markets else base_interval
-                await asyncio.sleep(scan_interval)
-                
-            except asyncio.CancelledError:
-                logger.info(f"[{asset}] Trading loop cancelled")
-                state.phase = ScanningPhase.IDLE
-                raise
-            except Exception as e:
-                # Isolated error handling - don't crash the other asset loops
-                state.phase = ScanningPhase.ERROR
-                state.last_error = str(e)
-                state.error_count += 1
-                state.consecutive_errors += 1
-                
-                logger.error(f"[{asset}] Trading loop error: {e}")
-                
-                # Exponential backoff on consecutive errors (max 60s)
-                backoff = min(60, 2 ** min(state.consecutive_errors, 6))
-                logger.info(f"[{asset}] Backing off for {backoff}s after {state.consecutive_errors} consecutive errors")
-                await asyncio.sleep(backoff)
-        
-        state.phase = ScanningPhase.IDLE
-        logger.info(f"[{asset}] Trading loop stopped")
     
     async def _scan_markets_for_asset(self, asset: str) -> List[Market5Min]:
         """
@@ -641,36 +902,6 @@ class Orchestrator:
         # TA signals can be used to inform trading decisions when pure arbitrage
         # opportunities are not available
     
-    async def _stats_reporter(self):
-        """Periodically report trading statistics."""
-        # All supported crypto symbols
-        CRYPTO_SYMBOLS = ["BTC", "ETH", "SOL", "XRP", "DOGE", "BNB"]
-        
-        while self._running:
-            try:
-                await asyncio.sleep(60)  # Report every minute
-                
-                print("\n" + "-" * 40)
-                print(f"  [STATS] @ {datetime.now(timezone.utc).strftime('%H:%M:%S UTC')}")
-                print("-" * 40)
-                
-                # Display all crypto prices
-                for symbol in CRYPTO_SYMBOLS:
-                    price_data = self._oracle.get_price(symbol)
-                    if price_data:
-                        print(f"  {symbol}: ${price_data.price:,.2f}")
-                    else:
-                        print(f"  {symbol}: N/A")
-                
-                print(f"  Trades: {self._total_trades}")
-                print(f"  Profit: ${self._total_profit:.2f}")
-                print("-" * 40 + "\n")
-                
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                logger.debug(f"Stats reporter error: {e}")
-    
     async def _cleanup(self):
         """Cleanup resources on shutdown."""
         try:
@@ -685,6 +916,10 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"Cleanup error: {e}")
 
+
+# ============================================================================
+# LOGGING AND ENTRY POINT
+# ============================================================================
 
 def setup_logging():
     """Configure logging for the application."""
@@ -744,6 +979,7 @@ async def main():
     print()
     print("  POLYMARKET ARBITRAGE BOT")
     print("  High-Frequency 5-Minute Portfolio Compounding System")
+    print("  Task-36: asyncio.gather Orchestration")
     print("=" * 60)
     print()
     

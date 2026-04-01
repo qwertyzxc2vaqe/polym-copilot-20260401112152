@@ -1,0 +1,157 @@
+# Docker Compose - Phase 2 Educational ASI Sandbox Stack
+# 
+# Containerizes: Python engine, Redis, PostgreSQL, Prometheus, Grafana
+# Educational purpose only - paper trading simulation
+#
+# Usage: docker-compose up -d
+
+version: '3.8'
+
+services:
+  # Redis - Ultra-fast IPC buffer
+  redis:
+    image: redis:7-alpine
+    container_name: polym_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - polym_network
+
+  # PostgreSQL - Timeseries tick data storage
+  postgres:
+    image: postgres:16-alpine
+    container_name: polym_postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: polym
+      POSTGRES_PASSWORD: polym_dev
+      POSTGRES_DB: polym_sandbox
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./data/init_db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polym -d polym_sandbox"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - polym_network
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:v2.49.0
+    container_name: polym_prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./data/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - polym_network
+
+  # Grafana - Visualization dashboards
+  grafana:
+    image: grafana/grafana:10.3.0
+    container_name: polym_grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: polym_admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./data/grafana_dashboard.json:/etc/grafana/provisioning/dashboards/polym.json:ro
+      - ./data/grafana_datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - polym_network
+
+  # JupyterLab - Interactive analysis
+  jupyter:
+    image: jupyter/scipy-notebook:latest
+    container_name: polym_jupyter
+    ports:
+      - "8888:8888"
+    environment:
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: "polym_dev"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data:ro
+    depends_on:
+      - postgres
+      - redis
+    restart: unless-stopped
+    networks:
+      - polym_network
+
+  # Python Simulation Engine (optional - can also run locally)
+  # Uncomment to run in container
+  # polym_engine:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #   container_name: polym_engine
+  #   environment:
+  #     REDIS_HOST: redis
+  #     POSTGRES_HOST: postgres
+  #     PROMETHEUS_PORT: 8000
+  #   volumes:
+  #     - ./src:/app/src
+  #     - ./data:/app/data
+  #     - ./logs:/app/logs
+  #   depends_on:
+  #     - redis
+  #     - postgres
+  #     - prometheus
+  #   restart: unless-stopped
+  #   networks:
+  #     - polym_network
+
+volumes:
+  redis_data:
+    driver: local
+  postgres_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  polym_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

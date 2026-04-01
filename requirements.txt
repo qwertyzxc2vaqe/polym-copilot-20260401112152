@@ -38,3 +38,46 @@ rich>=13.0.0
 # Development/Testing
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
+
+# Phase 2 - Educational ASI Sandbox Dependencies
+# Cython for performance optimization
+Cython>=3.0.0
+
+# Redis for IPC buffer
+redis>=5.0.0
+
+# Machine Learning - PyTorch
+torch>=2.2.0
+torchvision>=0.17.0
+
+# Scikit-learn for ML preprocessing
+scikit-learn>=1.4.0
+
+# Prometheus metrics
+prometheus-client>=0.20.0
+
+# JupyterLab for EDA
+jupyterlab>=4.1.0
+
+# ZeroMQ for async messaging
+pyzmq>=25.1.0
+
+# PostgreSQL async driver
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.9
+
+# ONNX for model export
+onnx>=1.15.0
+onnxruntime>=1.17.0
+
+# PDF Report Generation
+reportlab>=4.1.0
+
+# Parquet for data archival
+pyarrow>=15.0.0
+
+# Bayesian Optimization
+optuna>=3.5.0
+
+# Monte Carlo utilities
+scipy>=1.12.0

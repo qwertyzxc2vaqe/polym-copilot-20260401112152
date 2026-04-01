@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.align import Align
+from rich.progress import Progress, BarColumn
 
 from oracle import BinanceOracle, PriceData
 from scanner import MarketScanner, Market5Min, ScanningPhase
@@ -74,6 +75,18 @@ class Dashboard:
         self._running = False
         self._markets: Dict[str, Market5Min] = {}  # asset -> closest market
         self._yes_prices: Dict[str, float] = {}  # asset -> yes price
+        
+        # Task-33: Inventory tracking (mock data)
+        self._inventory: Dict[str, Dict[str, int]] = {
+            "BTC": {"yes_shares": 150, "no_shares": 75, "pending_merges": 3},
+            "ETH": {"yes_shares": 500, "no_shares": 250, "pending_merges": 2},
+        }
+        
+        # Task-34: Session PnL tracking
+        self._session_profit: float = 0.0
+        self._merged_shares: int = 0
+        self._paper_usdc: float = 100.0
+        self._session_start_time = datetime.now(timezone.utc)
     
     def get_bot_mode(self) -> str:
         """Get the current bot mode as a display string."""
@@ -294,6 +307,221 @@ class Dashboard:
             height=3,
         )
     
+    def get_ticker_countdown(self) -> Panel:
+        """
+        Task-31: Real-time ticker counting down to market end in MILLISECONDS.
+        """
+        # Find market with earliest expiry across all assets
+        closest_market = None
+        for market in self._markets.values():
+            if closest_market is None or market.seconds_to_expiry < closest_market.seconds_to_expiry:
+                closest_market = market
+        
+        if not closest_market:
+            return Panel(
+                Text("No active market", style="dim italic"),
+                title="⏱ MARKET COUNTDOWN",
+                border_style="dim",
+                padding=(1, 2),
+            )
+        
+        # Calculate time remaining in milliseconds
+        seconds_remaining = closest_market.seconds_to_expiry
+        ms_remaining = int(seconds_remaining * 1000)
+        
+        # Format: MM:SS.mmm
+        minutes = ms_remaining // 60000
+        seconds = (ms_remaining % 60000) // 1000
+        millis = ms_remaining % 1000
+        
+        countdown_str = f"{minutes:02d}:{seconds:02d}.{millis:03d}"
+        
+        # Color based on urgency
+        if ms_remaining <= 10000:  # 10 seconds
+            style = "red bold blink"
+        elif ms_remaining <= 30000:  # 30 seconds
+            style = "red bold"
+        elif ms_remaining <= 60000:  # 1 minute
+            style = "yellow bold"
+        else:
+            style = "green bold"
+        
+        content = Text()
+        content.append("⏳ ", style="bold")
+        content.append(countdown_str, style=style)
+        content.append("\n", style="dim")
+        content.append(closest_market.asset.upper(), style="dim italic")
+        
+        return Panel(
+            Align.center(content),
+            title="⏱ MARKET COUNTDOWN",
+            border_style=style.split()[0] if style else "white",
+            padding=(1, 2),
+        )
+    
+    def get_oracle_panel(self) -> Panel:
+        """
+        Task-32: Live Oracle panel showing Binance price vs Polymarket implied 
+        probability with OFI color-coding (green/red).
+        """
+        table = Table(
+            show_header=True,
+            header_style="bold cyan",
+            box=None,
+            padding=(0, 1),
+            expand=True,
+        )
+        table.add_column("Asset", style="bold", width=10)
+        table.add_column("Binance Price", justify="right", width=18)
+        table.add_column("Implied Prob", justify="right", width=14)
+        table.add_column("OFI Status", justify="center", width=12)
+        
+        for asset in self.ASSETS:
+            # Get Binance price
+            price_data = self.oracle.get_price(asset)
+            binance_price = price_data.price if price_data else None
+            
+            # Get Polymarket implied probability (from yes price)
+            yes_price = self._yes_prices.get(asset)
+            
+            if binance_price is None or yes_price is None:
+                table.add_row(
+                    asset,
+                    Text("N/A", style="dim"),
+                    Text("N/A", style="dim"),
+                    Text("--", style="dim"),
+                )
+                continue
+            
+            # Format Binance price
+            binance_text = Text(f"${binance_price:,.2f}", style="green bold")
+            
+            # Format implied probability as percentage
+            implied_prob = yes_price * 100
+            prob_text = Text(f"{implied_prob:.1f}%", style="yellow")
+            
+            # OFI logic: compare implied prob vs market sentiment
+            # Green if probability is high (bullish), Red if low (bearish)
+            ofi_differential = implied_prob - 50  # 50% is neutral
+            
+            if abs(ofi_differential) < 5:
+                ofi_status = Text("NEUTRAL", style="white")
+            elif ofi_differential > 0:
+                ofi_status = Text("🟢 BULLISH", style="green bold")
+            else:
+                ofi_status = Text("🔴 BEARISH", style="red bold")
+            
+            table.add_row(
+                asset,
+                binance_text,
+                prob_text,
+                ofi_status,
+            )
+        
+        return Panel(
+            table,
+            title="[bold cyan]ORACLE FEED - Binance vs Polymarket[/bold cyan]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    
+    def get_inventory_panel(self) -> Panel:
+        """
+        Task-33: Inventory Tracker showing mock YES shares, NO shares, pending merges.
+        """
+        table = Table(
+            show_header=True,
+            header_style="bold magenta",
+            box=None,
+            padding=(0, 1),
+            expand=True,
+        )
+        table.add_column("Asset", style="bold", width=10)
+        table.add_column("YES Shares", justify="right", width=14)
+        table.add_column("NO Shares", justify="right", width=14)
+        table.add_column("Pending Merges", justify="right", width=16)
+        table.add_column("Total", justify="right", width=10)
+        
+        for asset in self.ASSETS:
+            inv = self._inventory.get(asset, {})
+            yes_shares = inv.get("yes_shares", 0)
+            no_shares = inv.get("no_shares", 0)
+            pending = inv.get("pending_merges", 0)
+            total = yes_shares + no_shares
+            
+            yes_text = Text(f"{yes_shares}", style="green bold")
+            no_text = Text(f"{no_shares}", style="red bold")
+            
+            pending_style = "yellow bold" if pending > 0 else "dim"
+            pending_text = Text(f"{pending}", style=pending_style)
+            
+            total_text = Text(f"{total}", style="cyan bold")
+            
+            table.add_row(
+                asset,
+                yes_text,
+                no_text,
+                pending_text,
+                total_text,
+            )
+        
+        return Panel(
+            table,
+            title="[bold magenta]INVENTORY TRACKER[/bold magenta]",
+            border_style="magenta",
+            padding=(1, 2),
+        )
+    
+    def get_pnl_panel(self) -> Panel:
+        """
+        Task-34: Dynamic PnL metric showing session profit from merged shares 
+        minus 100 Paper-USDC.
+        """
+        # Calculate net PnL
+        net_pnl = self._session_profit - self._paper_usdc
+        
+        # Determine color based on PnL
+        if net_pnl > 0:
+            pnl_style = "green bold"
+            pnl_prefix = "↑ "
+        elif net_pnl < 0:
+            pnl_style = "red bold"
+            pnl_prefix = "↓ "
+        else:
+            pnl_style = "yellow bold"
+            pnl_prefix = "→ "
+        
+        # Build content
+        content = Text()
+        content.append("Session Performance\n", style="bold dim")
+        content.append("\n")
+        content.append("Profit from Merges:  ", style="bold")
+        content.append(f"${self._session_profit:+,.2f}\n", style="green bold")
+        
+        content.append("Paper-USDC Cost:  ", style="bold")
+        content.append(f"$({self._paper_usdc:.2f})\n", style="yellow")
+        
+        content.append("\n")
+        content.append("Net PnL:  ", style="bold")
+        content.append(f"{pnl_prefix}${net_pnl:+,.2f}", style=pnl_style)
+        
+        content.append("\n\n")
+        content.append("Shares Merged:  ", style="bold")
+        content.append(f"{self._merged_shares}\n", style="cyan bold")
+        
+        # Session duration
+        elapsed = datetime.now(timezone.utc) - self._session_start_time
+        elapsed_mins = int(elapsed.total_seconds() / 60)
+        content.append("Session Duration:  ", style="bold")
+        content.append(f"{elapsed_mins}m\n", style="dim")
+        
+        return Panel(
+            content,
+            title="[bold green]SESSION PnL[/bold green]",
+            border_style="green",
+            padding=(1, 2),
+        )
+    
     def get_header(self) -> Panel:
         """Build the header panel."""
         title = Text()
@@ -316,18 +544,41 @@ class Dashboard:
         """Build the complete dashboard layout."""
         layout = Layout()
         
-        # Main structure: header, body, footer
+        # Main structure: header, body sections, footer
         layout.split_column(
             Layout(name="header", size=6),
-            Layout(name="body", ratio=1),
-            Layout(name="footer", size=3),
+            Layout(name="top_body", size=12),      # Ticker, Oracle, Inventory, PnL
+            Layout(name="middle_body", ratio=1),    # BTC and ETH markets
+            Layout(name="footer", size=3),          # Status bar
         )
         
         # Header
         layout["header"].update(self.get_header())
         
-        # Body: split into two columns for BTC and ETH
-        layout["body"].split_row(
+        # Top body: 2x2 grid for new features
+        layout["top_body"].split_row(
+            Layout(name="ticker_pnl", ratio=1),
+            Layout(name="oracle_inventory", ratio=1),
+        )
+        
+        # Left side: Ticker + PnL
+        layout["ticker_pnl"].split_column(
+            Layout(name="ticker", size=6),
+            Layout(name="pnl", ratio=1),
+        )
+        layout["ticker"].update(self.get_ticker_countdown())
+        layout["pnl"].update(self.get_pnl_panel())
+        
+        # Right side: Oracle + Inventory
+        layout["oracle_inventory"].split_column(
+            Layout(name="oracle", size=8),
+            Layout(name="inventory", ratio=1),
+        )
+        layout["oracle"].update(self.get_oracle_panel())
+        layout["inventory"].update(self.get_inventory_panel())
+        
+        # Middle body: split into two columns for BTC and ETH markets
+        layout["middle_body"].split_row(
             Layout(name="btc", ratio=1),
             Layout(name="eth", ratio=1),
         )
@@ -367,6 +618,35 @@ class Dashboard:
             price: Yes price (0-1 range)
         """
         self._yes_prices[asset.upper()] = price
+    
+    def update_session_pnl(self, profit: float, merged_shares: int) -> None:
+        """
+        Update session PnL metrics.
+        
+        Args:
+            profit: Total profit from merged shares
+            merged_shares: Number of shares successfully merged
+        """
+        self._session_profit = profit
+        self._merged_shares = merged_shares
+    
+    def update_inventory(self, asset: str, yes_shares: int, no_shares: int, pending_merges: int) -> None:
+        """
+        Update inventory for an asset.
+        
+        Args:
+            asset: Asset symbol (BTC or ETH)
+            yes_shares: Number of YES shares held
+            no_shares: Number of NO shares held
+            pending_merges: Number of pending merge operations
+        """
+        asset = asset.upper()
+        if asset in self.ASSETS:
+            self._inventory[asset] = {
+                "yes_shares": yes_shares,
+                "no_shares": no_shares,
+                "pending_merges": pending_merges,
+            }
     
     async def run(self) -> None:
         """
